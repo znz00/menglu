@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>交互演示 (序列帧版 - 独立高位循环)</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden; /* [关键] 禁止出现滚动条 */
+      background: #000; /* 视频背景通常为黑色 */
+      font-family: sans-serif;
+    }
+    
+    #container {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%; /* [关键] 高度撑满屏幕 */
+      background: #000;
+      border-radius: 0; 
+      box-shadow: none;
+    }
+    
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+    
+    /* UI 层样式微调，适应全屏 */
+    #ui-layer {
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      background: rgba(0,0,0,0.6);
+      transition: opacity 0.3s;
+      z-index: 10;
+      pointer-events: none; /* 让点击穿透，除非点按钮 */
+    }
+    /* 恢复按钮的点击响应 */
+    #ui-layer button {
+      pointer-events: auto;
+    }
+
+    #loading-text {
+      color: #7bed9f;
+      margin-bottom: 20px;
+      font-weight: bold;
+      text-align: center;
+      white-space: pre-wrap;
+    }
+    #start-btn {
+      padding: 12px 24px;
+      font-size: 18px;
+      cursor: pointer;
+      background: #ff4757;
+      color: #fff;
+      border: none;
+      border-radius: 25px;
+      transition: transform 0.1s;
+      display: none; 
+    }
+    #start-btn:active { transform: scale(0.95); }
+    
+    #status {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      font-size: 12px;
+      color: rgba(255,255,255,0.7);
+      background: rgba(0,0,0,0.3);
+      padding: 4px 8px;
+      border-radius: 4px;
+      pointer-events: none;
+      z-index: 5;
+    }
+
+    #gauge-container {
+      position: absolute;
+      right: 15px;
+      bottom: 120px; /* 稍微上移，避免被底部控制遮挡 */
+      width: 8px;
+      height: 150px;
+      background: rgba(0, 0, 0, 0.5);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 10px;
+      overflow: hidden;
+      z-index: 5;
+    }
+    
+    #gauge-bar {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      width: 100%;
+      height: 0%;
+      background: linear-gradient(to top, #2ed573, #eccc68, #ff4757);
+      transition: height 0.05s linear;
+    }
+    
+    #gauge-label {
+      position: absolute;
+      right: 28px;
+      bottom: 120px;
+      font-size: 10px;
+      color: rgba(255,255,255,0.5);
+      transform: rotate(-90deg);
+      transform-origin: right bottom;
+      pointer-events: none;
+    }
+
+    /* 控制栏改为底部浮动 */
+    #controls {
+      position: absolute;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 90%;
+      max-width: 400px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      align-items: center;
+      z-index: 20;
+    }
+    
+    .manual-btn {
+      padding: 12px;
+      background: rgba(46, 213, 115, 0.9);
+      border: none;
+      border-radius: 25px;
+      color: #fff;
+      cursor: pointer;
+      user-select: none;
+      width: 100%;
+      font-size: 14px;
+      box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+    }
+    .manual-btn:active { background: #26af61; transform: scale(0.98); }
+
+    #debug-info {
+      font-family: monospace;
+      font-size: 10px;
+      color: rgba(255, 107, 107, 0.8);
+      background: rgba(0, 0, 0, 0.5);
+      padding: 8px;
+      border-radius: 4px;
+      width: 100%;
+      text-align: center;
+      border: none;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="container">
+    <div id="status">准备就绪</div>
+    
+    <div id="gauge-container">
+      <div id="gauge-bar"></div>
+    </div>
+    <div id="gauge-label">力度</div>
+
+    <canvas id="gameCanvas"></canvas>
+    
+    <div id="ui-layer">
+      <div id="loading-text">正在检查文件...</div>
+      <button id="start-btn">点击开始交互</button>
+      <p style="margin-top:10px; font-size:12px; color:#aaa;">需允许麦克风权限</p>
+    </div>
+  </div>
+
+  <div id="controls">
+    <button class="manual-btn" id="manual-blow">按住测试 (模拟吹气)</button>
+    <div id="debug-info">状态: 初始静止</div>
+  </div>
+
+  <script>
+    // --- 配置区域 ---
+    const CONFIG = {
+      // [新思路] 声音判定参数
+      noiseThreshold: 45,       // 基础音量门槛
+      blowRatioThreshold: 1.1,  // 低音/中高音比率 (适当降低，配合稳定性判断)
+      
+      // [核心新增] 稳定性阈值
+      // 标准差(波动率)小于此值，才认为是持续的气流
+      // 说话声通常波动很大(>10)，吹气通常波动小(<5)
+      stabilityThreshold: 8.0, 
+      
+      minDuration: 5,       
+      
+      // 动画参数
+      riseSpeed: 3.0,        
+      dropSpeed: 4.0,        
+      
+      // 物理状态
+      currentHeight: 0,      // 0 - 100
+      maxHeight: 100,
+
+      // --- 图片资源配置 ---
+      mainSeq: {
+          path: 'imgwen',         
+          count: 31,              
+          ext: '.png',            
+          prefix: 'ezgif-frame-', 
+          startNum: 1             
+      },
+      loopSeq: {
+          path: 'imgwen/h-jpg',   
+          count: 6,               
+          ext: '.jpg',            
+          prefix: 'ezgif-frame-', 
+          startNum: 1,            
+          speed: 0.2              
+      }
+    };
+
+    const container = document.getElementById('container');
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const statusDiv = document.getElementById('status');
+    const startBtn = document.getElementById('start-btn');
+    const uiLayer = document.getElementById('ui-layer');
+    const loadingText = document.getElementById('loading-text');
+    const manualBtn = document.getElementById('manual-blow');
+    const gaugeBar = document.getElementById('gauge-bar');
+    const debugInfo = document.getElementById('debug-info');
+
+    let isAudioActive = false;
+    let analyser = null;
+    let dataArray = null;
+    let isManualBlowing = false;
+    let soundSustainCounter = 0;
+    
+    let highLoopCounter = 0;
+
+    // [新增] 音量历史记录，用于计算稳定性
+    let volHistory = [];
+    const volHistorySize = 10; // 记录最近10帧的音量
+
+    const imagesMain = [];
+    const imagesLoop = [];
+    
+    let totalAssets = CONFIG.mainSeq.count + CONFIG.loopSeq.count;
+    let loadedAssets = 0;
+    let errorAssets = 0;
+
+    function resizeCanvas() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    function preloadImages() {
+      debugInfo.textContent = "开始加载资源...\n";
+      loadSequence(CONFIG.mainSeq, imagesMain, "主序列");
+      loadSequence(CONFIG.loopSeq, imagesLoop, "循环序列");
+    }
+
+    function loadSequence(conf, targetArray, label) {
+        for (let i = 0; i < conf.count; i++) {
+            const img = new Image();
+            const frameNum = conf.startNum + i;
+            const formattedNum = String(frameNum).padStart(3, '0');
+            img.src = `${conf.path}/${conf.prefix}${formattedNum}${conf.ext}`;
+            
+            if (i === 0) {
+                setTimeout(() => {
+                    debugInfo.innerHTML += `<strong>${label}路径示例:</strong><br>${img.src}<br>`;
+                }, 100);
+            }
+
+            img.onload = () => { loadedAssets++; checkProgress(); };
+            img.onerror = () => { 
+                errorAssets++; 
+                img.isError = true; 
+                console.error(`加载失败: ${img.src}`);
+                checkProgress(); 
+            };
+            targetArray.push(img);
+        }
+    }
+
+    function checkProgress() {
+        const totalProcessed = loadedAssets + errorAssets;
+        const percent = Math.floor((totalProcessed / totalAssets) * 100);
+        
+        if (errorAssets > 0) {
+            loadingText.innerHTML = `进度: ${percent}% (失败:${errorAssets})`;
+        } else {
+            loadingText.textContent = `加载中: ${percent}%`;
+        }
+        
+        if (totalProcessed === totalAssets) {
+            startBtn.style.display = 'block';
+            loadingText.style.display = 'none';
+            drawImageObj(imagesMain[imagesMain.length - 1]);
+        }
+    }
+
+    function drawImageObj(imgObj) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      if (imgObj && imgObj.complete && imgObj.naturalHeight !== 0) {
+        const imgRatio = imgObj.naturalWidth / imgObj.naturalHeight;
+        let renderW = canvas.width;
+        let renderH = renderW / imgRatio;
+        let offsetX = 0;
+        let offsetY = (canvas.height - renderH) / 2; 
+        ctx.drawImage(imgObj, offsetX, offsetY, renderW, renderH);
+      } else {
+        ctx.fillStyle = '#111';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'center';
+        ctx.fillText(`Image Not Found`, canvas.width/2, canvas.height/2);
+      }
+      gaugeBar.style.height = `${CONFIG.currentHeight}%`;
+    }
+
+    // --- [核心修改] 增加稳定性判定的吹气算法 ---
+    function analyzeBlowLogic(frequencyData) {
+        // 1. 基础能量计算
+        let lowEnergy = 0;
+        let lowBinCount = 10; // 0-430Hz
+        for (let i = 0; i < lowBinCount; i++) lowEnergy += frequencyData[i];
+        let avgLow = lowEnergy / lowBinCount;
+
+        let highEnergy = 0;
+        let highBinCount = 0;
+        for (let i = 12; i < 100; i++) {
+            if (i < frequencyData.length) {
+                highEnergy += frequencyData[i];
+                highBinCount++;
+            }
+        }
+        let avgHigh = highEnergy / highBinCount;
+
+        // 2. 存入历史记录
+        volHistory.push(avgLow);
+        if (volHistory.length > volHistorySize) volHistory.shift();
+
+        // 3. 计算标准差 (Standard Deviation) - 衡量稳定性
+        let sum = volHistory.reduce((a, b) => a + b, 0);
+        let mean = sum / volHistory.length;
+        let variance = volHistory.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / volHistory.length;
+        let stdDev = Math.sqrt(variance);
+
+        // 4. 综合判定
+        // 条件A: 够响 (avgLow > noiseThreshold)
+        // 条件B: 够低沉 (avgLow > avgHigh * ratio)
+        // 条件C: [新] 够稳定 (stdDev < stabilityThreshold) - 排除忽大忽小的说话声
+        
+        const isLoudEnough = avgLow > CONFIG.noiseThreshold;
+        const isLowFreq = avgLow > (avgHigh * CONFIG.blowRatioThreshold);
+        const isStable = stdDev < CONFIG.stabilityThreshold;
+        
+        // 只有历史数据填满后才开始校验稳定性
+        const isReady = volHistory.length >= volHistorySize;
+        
+        const isBlow = isReady && isLoudEnough && isLowFreq && isStable;
+        
+        return {
+            isBlow: isBlow,
+            avgLow: avgLow,
+            avgHigh: avgHigh,
+            stdDev: stdDev // 返回波动值用于调试
+        };
+    }
+
+    function updateLogic(analysisResult) {
+      if (analysisResult && analysisResult.isBlow) {
+          soundSustainCounter++;
+      } else {
+          soundSustainCounter = 0;
+      }
+      
+      const isBlowing = (soundSustainCounter > CONFIG.minDuration) || isManualBlowing;
+
+      let debugText = "";
+      if (analysisResult) {
+          // 显示：音量 | 波动值
+          debugText = `音量:${Math.floor(analysisResult.avgLow)} 波动:${analysisResult.stdDev.toFixed(1)}`;
+          
+          if (analysisResult.avgLow > CONFIG.noiseThreshold) {
+              if (analysisResult.stdDev > CONFIG.stabilityThreshold) {
+                  debugText += " (波动太大-忽略)"; // 识别为人声
+                  statusDiv.style.color = "#eccc68"; 
+              } else if (!analysisResult.isBlow) {
+                  debugText += " (音色不对)";
+                  statusDiv.style.color = "#eccc68";
+              } else if (isBlowing) {
+                  debugText += " (吹气中!)";
+                  statusDiv.style.color = "#7bed9f"; 
+              }
+          } else {
+              statusDiv.style.color = "#ccc";
+          }
+      }
+      statusDiv.textContent = debugText;
+
+      if (isBlowing) {
+          CONFIG.currentHeight += CONFIG.riseSpeed;
+      } else {
+          CONFIG.currentHeight -= CONFIG.dropSpeed;
+      }
+
+      if (CONFIG.currentHeight > CONFIG.maxHeight) CONFIG.currentHeight = CONFIG.maxHeight;
+      if (CONFIG.currentHeight < 0) CONFIG.currentHeight = 0;
+
+      // 渲染逻辑
+      if (CONFIG.currentHeight >= CONFIG.maxHeight && isBlowing) {
+          debugInfo.textContent = "状态: 高位循环 (h-jpg)";
+          highLoopCounter += CONFIG.loopSeq.speed;
+          const loopIndex = Math.floor(highLoopCounter) % CONFIG.loopSeq.count;
+          drawImageObj(imagesLoop[loopIndex]);
+      } else {
+          highLoopCounter = 0;
+          if (CONFIG.currentHeight <= 0) {
+             debugInfo.textContent = "状态: 底部静止";
+          } else {
+             debugInfo.textContent = isBlowing ? "状态: 上升..." : "状态: 下落...";
+          }
+          let progress = CONFIG.currentHeight / CONFIG.maxHeight;
+          let frameIndex = Math.floor((1 - progress) * (CONFIG.mainSeq.count - 1));
+          frameIndex = Math.max(0, Math.min(frameIndex, CONFIG.mainSeq.count - 1));
+          drawImageObj(imagesMain[frameIndex]);
+      }
+    }
+
+    function loop() {
+      let analysisResult = null;
+      if (isAudioActive && analyser && dataArray) {
+        analyser.getByteFrequencyData(dataArray);
+        analysisResult = analyzeBlowLogic(dataArray);
+      }
+      updateLogic(analysisResult);
+      requestAnimationFrame(loop);
+    }
+
+    async function initMic() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        analyser = audioContext.createAnalyser();
+        analyser.fftSize = 1024; 
+        
+        const source = audioContext.createMediaStreamSource(stream);
+        source.connect(analyser);
+        dataArray = new Uint8Array(analyser.frequencyBinCount);
+        isAudioActive = true;
+        uiLayer.style.display = 'none'; 
+        loop(); 
+      } catch (err) {
+        console.error(err);
+        alert("无法获取麦克风。");
+        uiLayer.style.display = 'none';
+        loop();
+      }
+    }
+
+    startBtn.addEventListener('click', initMic);
+    manualBtn.addEventListener('mousedown', () => isManualBlowing = true);
+    manualBtn.addEventListener('mouseup', () => isManualBlowing = false);
+    manualBtn.addEventListener('mouseleave', () => isManualBlowing = false);
+    manualBtn.addEventListener('touchstart', (e) => { e.preventDefault(); isManualBlowing = true; });
+    manualBtn.addEventListener('touchend', (e) => { e.preventDefault(); isManualBlowing = false; });
+
+    preloadImages();
+  </script>
+</body>
+</html>
