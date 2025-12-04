@@ -82,6 +82,28 @@
       z-index: 5;
     }
 
+    /* 全屏按钮样式 */
+    #fullscreen-btn {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      background: rgba(0, 0, 0, 0.5);
+      border: 1px solid rgba(255, 255, 255, 0.3);
+      color: rgba(255, 255, 255, 0.8);
+      padding: 6px 12px;
+      border-radius: 4px;
+      font-size: 12px;
+      cursor: pointer;
+      z-index: 30;
+      transition: background 0.2s;
+    }
+    #fullscreen-btn:hover {
+      background: rgba(255, 255, 255, 0.3);
+    }
+    #fullscreen-btn:active {
+      background: rgba(255, 255, 255, 0.5);
+    }
+
     #gauge-container {
       position: absolute;
       right: 15px;
@@ -162,6 +184,7 @@
 
   <div id="container">
     <div id="status">准备就绪</div>
+    <button id="fullscreen-btn">全屏显示</button>
     
     <div id="gauge-container">
       <div id="gauge-bar"></div>
@@ -232,6 +255,7 @@
     const manualBtn = document.getElementById('manual-blow');
     const gaugeBar = document.getElementById('gauge-bar');
     const debugInfo = document.getElementById('debug-info');
+    const fullscreenBtn = document.getElementById('fullscreen-btn');
 
     let isAudioActive = false;
     let analyser = null;
@@ -258,6 +282,32 @@
     }
     window.addEventListener('resize', resizeCanvas);
     resizeCanvas();
+
+    // --- 全屏逻辑 ---
+    function toggleFullScreen() {
+      if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen().catch(err => {
+          console.log(`无法开启全屏: ${err.message}`);
+        });
+        fullscreenBtn.textContent = "退出全屏";
+      } else {
+        if (document.exitFullscreen) {
+          document.exitFullscreen();
+          fullscreenBtn.textContent = "全屏显示";
+        }
+      }
+    }
+    fullscreenBtn.addEventListener('click', toggleFullScreen);
+    
+    // 监听全屏变化事件，以防用户按ESC退出
+    document.addEventListener('fullscreenchange', () => {
+        if (!document.fullscreenElement) {
+            fullscreenBtn.textContent = "全屏显示";
+        } else {
+            fullscreenBtn.textContent = "退出全屏";
+        }
+    });
+
 
     function preloadImages() {
       debugInfo.textContent = "开始加载资源...\n";
@@ -310,11 +360,27 @@
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       
       if (imgObj && imgObj.complete && imgObj.naturalHeight !== 0) {
+        // --- [修复] 图片自适应算法 (Contain 模式) ---
+        // 计算画布和图片的比例
+        const canvasRatio = canvas.width / canvas.height;
         const imgRatio = imgObj.naturalWidth / imgObj.naturalHeight;
-        let renderW = canvas.width;
-        let renderH = renderW / imgRatio;
-        let offsetX = 0;
-        let offsetY = (canvas.height - renderH) / 2; 
+        
+        let renderW, renderH;
+
+        // 如果图片比画布更"宽"，则以画布宽度为基准（上下留黑边）
+        // 如果图片比画布更"窄"（高），则以画布高度为基准（左右留黑边）
+        if (imgRatio > canvasRatio) {
+            renderW = canvas.width;
+            renderH = renderW / imgRatio;
+        } else {
+            renderH = canvas.height;
+            renderW = renderH * imgRatio;
+        }
+        
+        // 居中计算
+        const offsetX = (canvas.width - renderW) / 2;
+        const offsetY = (canvas.height - renderH) / 2; 
+        
         ctx.drawImage(imgObj, offsetX, offsetY, renderW, renderH);
       } else {
         ctx.fillStyle = '#111';
